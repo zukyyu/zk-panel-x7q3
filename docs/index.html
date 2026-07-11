@@ -1,1 +1,735 @@
-あ
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<!-- モバイル Safari 最適化: 端末幅にフィットさせ、入力欄フォーカス時の自動ズームを抑止する -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="color-scheme" content="dark" />
+<title>AI Video Factory コントロールパネル</title>
+<style>
+  /*
+   * 追加コスト0の制約により外部 CSS/JS/フォントは一切読み込まない。
+   * ダークテーマ + モバイル Safari(iPad/iPhone)最適化を素の CSS のみで実現する。
+   */
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2330;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #2ea043;
+    --accent-hover: #3fb950;
+    --danger: #f85149;
+    --warn: #d29922;
+    --link: #58a6ff;
+    --radius: 14px;
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
+      "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px; /* iOS Safari の入力フォーカス時ズームを防ぐ最小サイズ */
+    line-height: 1.6;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  .app {
+    max-width: 640px;
+    margin: 0 auto;
+    /* iPhone のノッチ / ホームバーを避ける safe-area 対応 */
+    padding: calc(env(safe-area-inset-top) + 16px) 16px
+             calc(env(safe-area-inset-bottom) + 32px);
+  }
+
+  header h1 {
+    font-size: 1.35rem;
+    margin: 4px 0 2px;
+  }
+  header p { color: var(--muted); margin: 0 0 16px; font-size: 0.85rem; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .card h2 {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin: 0 0 12px;
+  }
+
+  label { display: block; font-size: 0.8rem; color: var(--muted); margin: 10px 0 4px; }
+
+  input[type="text"], input[type="password"] {
+    width: 100%;
+    padding: 12px 14px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 16px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  input:focus { outline: none; border-color: var(--link); }
+
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; }
+
+  /* 大きな【動画を作成】ボタン */
+  .btn-primary {
+    width: 100%;
+    padding: 20px;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #fff;
+    background: var(--accent);
+    border: none;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background 0.15s ease, opacity 0.15s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    min-height: 68px;
+  }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-primary:disabled { opacity: 0.55; cursor: not-allowed; }
+
+  .btn-secondary {
+    padding: 10px 14px;
+    font-size: 0.85rem;
+    color: var(--text);
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+  }
+  .btn-secondary:hover { border-color: var(--link); }
+
+  /* スピナー */
+  .spinner {
+    width: 20px; height: 20px;
+    border: 3px solid rgba(255,255,255,0.35);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 公開設定トグル */
+  .privacy {
+    display: flex;
+    gap: 8px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 5px;
+  }
+  .privacy button {
+    flex: 1;
+    padding: 12px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .privacy button.active[data-value="private"] { background: #30363d; color: var(--text); }
+  .privacy button.active[data-value="public"]  { background: var(--warn); color: #1a1a1a; }
+  .privacy-note { font-size: 0.78rem; color: var(--muted); margin-top: 8px; }
+
+  /* ステップ進捗 */
+  .steps { list-style: none; margin: 0; padding: 0; }
+  .step {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 10px;
+    border-radius: 10px;
+    border: 1px solid transparent;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .step + .step { margin-top: 4px; }
+  .step .icon { width: 26px; text-align: center; font-size: 1.1rem; flex: 0 0 auto; }
+  .step .name { font-weight: 600; }
+  .step .desc { display: block; font-size: 0.75rem; color: var(--muted); font-weight: 400; }
+  .step.current { background: rgba(88,166,255,0.10); border-color: rgba(88,166,255,0.4); }
+  .step.done .name { color: var(--accent-hover); }
+  .step.failed .name { color: var(--danger); }
+  .step.pending { opacity: 0.55; }
+
+  /* 結果サマリー */
+  .result dt { font-size: 0.75rem; color: var(--muted); margin-top: 10px; }
+  .result dd { margin: 2px 0 0; font-size: 1rem; word-break: break-word; }
+  .result a { color: var(--link); text-decoration: none; }
+  .yt-link {
+    display: block;
+    margin-top: 14px;
+    padding: 14px;
+    text-align: center;
+    background: var(--panel-2);
+    border: 1px solid var(--link);
+    border-radius: 12px;
+    color: var(--link) !important;
+    font-weight: 700;
+  }
+
+  .banner {
+    padding: 12px 14px;
+    border-radius: 10px;
+    font-size: 0.85rem;
+    margin-bottom: 12px;
+    display: none;
+  }
+  .banner.error   { display: block; background: rgba(248,81,73,0.12); border: 1px solid var(--danger); color: #ffb4ae; }
+  .banner.info    { display: block; background: rgba(88,166,255,0.10); border: 1px solid var(--link); color: #a9d1ff; }
+  .banner.warn    { display: block; background: rgba(210,153,34,0.12); border: 1px solid var(--warn); color: #f2cc60; }
+
+  .link-btn {
+    display: inline-block;
+    color: var(--link);
+    text-decoration: none;
+    font-size: 0.85rem;
+    margin-top: 10px;
+  }
+
+  /* 実行履歴 */
+  .history { list-style: none; margin: 0; padding: 0; }
+  .history li {
+    padding: 12px 0;
+    border-top: 1px solid var(--border);
+    font-size: 0.85rem;
+  }
+  .history li:first-child { border-top: none; }
+  .history .h-title { font-weight: 600; }
+  .history .h-meta { color: var(--muted); font-size: 0.78rem; }
+  .badge {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    vertical-align: middle;
+  }
+  .badge.private { background: #30363d; color: var(--text); }
+  .badge.public  { background: var(--warn); color: #1a1a1a; }
+  .badge.ok      { background: rgba(46,160,67,0.25); color: var(--accent-hover); }
+  .badge.ng      { background: rgba(248,81,73,0.25); color: #ffb4ae; }
+  .badge.run     { background: rgba(88,166,255,0.2); color: var(--link); }
+
+  .hidden { display: none !important; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; }
+  .foot { text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 8px; }
+  .foot a { color: var(--link); }
+  code { background: var(--panel-2); padding: 1px 5px; border-radius: 5px; font-size: 0.85em; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>🎬 AI Video Factory</h1>
+    <p>iPad / iPhone からワンタップで動画パイプラインを起動</p>
+  </header>
+
+  <div id="banner" class="banner"></div>
+
+  <!-- ================= 設定(初回のみ) ================= -->
+  <section class="card" id="settingsCard">
+    <h2>接続設定</h2>
+    <label for="owner">リポジトリ (owner/repo)</label>
+    <input type="text" id="owner" placeholder="zukyyu/ai-video-factory" autocapitalize="off" autocorrect="off" spellcheck="false" />
+
+    <div class="row">
+      <div>
+        <label for="workflow">ワークフローファイル</label>
+        <input type="text" id="workflow" placeholder="pipeline.yml" autocapitalize="off" autocorrect="off" spellcheck="false" />
+      </div>
+      <div>
+        <label for="ref">ブランチ (ref)</label>
+        <input type="text" id="ref" placeholder="main" autocapitalize="off" autocorrect="off" spellcheck="false" />
+      </div>
+    </div>
+
+    <label for="token">Fine-grained PAT(Actions: Read/Write)</label>
+    <input type="password" id="token" placeholder="github_pat_..." autocapitalize="off" autocorrect="off" spellcheck="false" />
+    <p class="privacy-note">
+      トークンとはこの端末の <code>localStorage</code> にのみ保存され、ページには一切埋め込まれません。
+      発行手順は <a class="link-btn" href="https://github.com/zukyyu/ai-video-factory#webコントロールパネル-phase-15" target="_blank" rel="noopener">README</a> を参照。
+    </p>
+    <div class="row" style="margin-top:12px;">
+      <button class="btn-secondary" id="saveSettings">設定を保存</button>
+      <button class="btn-secondary" id="clearToken">トークンを削除</button>
+    </div>
+  </section>
+
+  <!-- ================= 実行 ================= -->
+  <section class="card">
+    <h2>公開設定</h2>
+    <div class="privacy" id="privacyToggle">
+      <button type="button" data-value="private" class="active">🔒 非公開</button>
+      <button type="button" data-value="public">🌍 公開</button>
+    </div>
+    <p class="privacy-note" id="privacyNote">
+      既定は <strong>非公開 (private)</strong>。まず非公開で投稿→内容を確認してから公開に切り替える運用を推奨します。
+    </p>
+
+    <button class="btn-primary" id="runBtn" style="margin-top:16px;">
+      <span id="runBtnLabel">▶ 動画を作成</span>
+    </button>
+  </section>
+
+  <!-- ================= 進捗 ================= -->
+  <section class="card hidden" id="progressCard">
+    <h2>進捗 <span id="progressState" class="badge run">起動中</span></h2>
+    <ul class="steps" id="steps"></ul>
+    <a class="link-btn" id="actionsLink" href="#" target="_blank" rel="noopener">Actions のログを開く ↗</a>
+  </section>
+
+  <!-- ================= 結果 ================= -->
+  <section class="card hidden" id="resultCard">
+    <h2>結果サマリー</h2>
+    <div id="resultBody"></div>
+  </section>
+
+  <!-- ================= 履歴 ================= -->
+  <section class="card">
+    <h2>実行履歴(直近5件)</h2>
+    <ul class="history" id="history"><li class="h-meta">まだ実行履歴はありません。</li></ul>
+  </section>
+
+  <p class="foot">
+    追加コスト0 / 素の HTML・JS・CSS のみ・サーバー不要 —
+    <a href="https://github.com/zukyyu/ai-video-factory" target="_blank" rel="noopener">AI Video Factory</a>
+  </p>
+</div>
+
+<script>
+"use strict";
+/*
+ * AI Video Factory Web コントロールパネル (Phase 1.5)
+ * ---------------------------------------------------------------
+ * ・サーバー不要。GitHub REST API を直接叩く。
+ * ・workflow_dispatch でパイプラインを起動し、
+ *   /actions/runs と /actions/runs/{id}/jobs をポーリングして進捗表示。
+ * ・トークンは localStorage にのみ保存(ページに埋め込まない)。
+ */
+
+const LS = {
+  token: "avf_token",
+  owner: "avf_owner",
+  workflow: "avf_workflow",
+  ref: "avf_ref",
+  privacy: "avf_privacy",
+  history: "avf_history",
+};
+
+// パイプラインの論理ステップ。step.name(小文字)に keyword が含まれれば対応付ける。
+const STEPS = [
+  { key: "research", keyword: "research", label: "リサーチ", desc: "トレンド収集→ideas" },
+  { key: "plan",     keyword: "plan",     label: "企画",     desc: "テーマ決定 (Claude)" },
+  { key: "script",   keyword: "script",   label: "台本",     desc: "台本生成 (Claude)" },
+  { key: "voice",    keyword: "voice",    label: "音声",     desc: "ナレーション (TTS)" },
+  { key: "video",    keyword: "video",    label: "動画",     desc: "縦型動画合成 (FFmpeg)" },
+  { key: "upload",   keyword: "upload",   label: "投稿",     desc: "YouTube Shorts" },
+];
+
+const API = "https://api.github.com";
+const POLL_MS = 4000;
+
+// ---- DOM ヘルパ -------------------------------------------------
+const $ = (id) => document.getElementById(id);
+const els = {
+  banner: $("banner"),
+  owner: $("owner"), workflow: $("workflow"), ref: $("ref"), token: $("token"),
+  saveSettings: $("saveSettings"), clearToken: $("clearToken"),
+  privacyToggle: $("privacyToggle"), privacyNote: $("privacyNote"),
+  runBtn: $("runBtn"), runBtnLabel: $("runBtnLabel"),
+  progressCard: $("progressCard"), progressState: $("progressState"),
+  steps: $("steps"), actionsLink: $("actionsLink"),
+  resultCard: $("resultCard"), resultBody: $("resultBody"),
+  history: $("history"),
+};
+
+let privacy = "private";
+let running = false;
+let pollTimer = null;
+
+// ---- localStorage 読み書き -------------------------------------
+function loadSettings() {
+  els.owner.value = localStorage.getItem(LS.owner) || "zukyyu/ai-video-factory";
+  els.workflow.value = localStorage.getItem(LS.workflow) || "pipeline.yml";
+  els.ref.value = localStorage.getItem(LS.ref) || "main";
+  els.token.value = localStorage.getItem(LS.token) || "";
+  setPrivacy(localStorage.getItem(LS.privacy) || "private");
+}
+
+function saveSettings() {
+  localStorage.setItem(LS.owner, els.owner.value.trim());
+  localStorage.setItem(LS.workflow, els.workflow.value.trim() || "pipeline.yml");
+  localStorage.setItem(LS.ref, els.ref.value.trim() || "main");
+  if (els.token.value.trim()) localStorage.setItem(LS.token, els.token.value.trim());
+  banner("info", "設定を保存しました。");
+}
+
+function cfg() {
+  return {
+    owner: (els.owner.value || "").trim(),
+    workflow: (els.workflow.value || "pipeline.yml").trim(),
+    ref: (els.ref.value || "main").trim(),
+    token: (els.token.value || localStorage.getItem(LS.token) || "").trim(),
+  };
+}
+
+// ---- バナー ------------------------------------------------------
+function banner(type, msg) {
+  els.banner.className = "banner " + type;
+  els.banner.innerHTML = msg;
+}
+function clearBanner() { els.banner.className = "banner"; els.banner.innerHTML = ""; }
+
+// ---- 公開設定トグル ---------------------------------------------
+function setPrivacy(value) {
+  privacy = value === "public" ? "public" : "private";
+  localStorage.setItem(LS.privacy, privacy);
+  els.privacyToggle.querySelectorAll("button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.value === privacy);
+  });
+  els.privacyNote.innerHTML = privacy === "public"
+    ? "⚠️ <strong>公開 (public)</strong> を選択中。作成した動画がそのまま全世界に公開されます。実行前に確認ダイアログが表示されます。"
+    : "既定は <strong>非公開 (private)</strong>。まず非公開で投稿→内容を確認してから公開に切り替える運用を推奨します。";
+}
+
+// ---- GitHub API 呼び出し ----------------------------------------
+async function gh(path, options) {
+  const { token } = cfg();
+  const res = await fetch(path.startsWith("http") ? path : API + path, {
+    ...options,
+    headers: {
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Authorization": "Bearer " + token,
+      ...(options && options.body ? { "Content-Type": "application/json" } : {}),
+    },
+  });
+  return res;
+}
+
+async function ghJson(path, options) {
+  const res = await gh(path, options);
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    const err = new Error("HTTP " + res.status);
+    err.status = res.status;
+    err.detail = text;
+    throw err;
+  }
+  return res.json();
+}
+
+// ---- 実行フロー --------------------------------------------------
+async function run() {
+  clearBanner();
+  const { owner, workflow, ref, token } = cfg();
+  if (!owner || owner.indexOf("/") < 0) { banner("error", "リポジトリを <code>owner/repo</code> 形式で入力してください。"); return; }
+  if (!token) { banner("error", "Fine-grained PAT を入力してください。"); return; }
+
+  // 公開選択時は確認ダイアログ
+  if (privacy === "public") {
+    const ok = window.confirm("⚠️ 「公開」で投稿します。\n作成される動画は全世界に公開されます。よろしいですか?");
+    if (!ok) return;
+  }
+
+  setRunning(true);
+  resetProgress();
+  banner("info", "パイプラインを起動しています…");
+
+  // 起動前の最新 run ID を控え、新しい run を確実に識別する
+  // owner 変数は "owner/repo" を含むため /repos/{owner}/actions/... で正しいパスになる
+  let baselineRunId = 0;
+  try {
+    const before = await ghJson(`/repos/${owner}/actions/workflows/${encodeURIComponent(workflow)}/runs?per_page=1`);
+    if (before.workflow_runs && before.workflow_runs[0]) baselineRunId = before.workflow_runs[0].id;
+  } catch (e) { /* 初回など run が無い場合は 0 のまま */ }
+
+  // workflow_dispatch でパイプライン起動
+  try {
+    const res = await gh(`/repos/${owner}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
+      method: "POST",
+      body: JSON.stringify({ ref, inputs: { privacy_status: privacy } }),
+    });
+    if (res.status !== 204) {
+      const detail = await res.text().catch(() => "");
+      if (res.status === 422 && /privacy_status|Unexpected inputs/i.test(detail)) {
+        throw new Error("pipeline.yml に <code>privacy_status</code> input が未定義です。README の追記例に従って pipeline.yml を更新してください。");
+      }
+      if (res.status === 401 || res.status === 403) {
+        throw new Error("認証に失敗しました。PAT の権限(このリポジトリの Actions: Read and write)と有効期限を確認してください。");
+      }
+      if (res.status === 404) {
+        throw new Error("ワークフローが見つかりません。リポジトリ名・ワークフローファイル名・ブランチを確認してください。");
+      }
+      throw new Error("起動に失敗しました (HTTP " + res.status + ")。" + escapeHtml(detail.slice(0, 300)));
+    }
+  } catch (e) {
+    banner("error", e.message || String(e));
+    setRunning(false);
+    return;
+  }
+
+  // 起動直後は run 一覧に反映されるまで数秒かかるためポーリングで待つ
+  banner("info", "起動しました。実行中の run を待機しています…");
+  const runId = await waitForRun(owner, workflow, baselineRunId);
+  if (!runId) {
+    banner("warn", "起動しましたが run を特定できませんでした。Actions ページで進捗を確認してください。");
+    setRunning(false);
+    return;
+  }
+  clearBanner();
+  pollRun(owner, runId);
+}
+
+// 新しい run が出現するまで待つ
+async function waitForRun(owner, workflow, baselineRunId, attempts = 15) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const data = await ghJson(`/repos/${owner}/actions/workflows/${encodeURIComponent(workflow)}/runs?per_page=5&event=workflow_dispatch`);
+      const runs = data.workflow_runs || [];
+      const fresh = runs.find((r) => r.id > baselineRunId);
+      if (fresh) return fresh.id;
+    } catch (e) { /* リトライ */ }
+    await sleep(2000);
+  }
+  return null;
+}
+
+// run をポーリングして進捗・完了を反映
+async function pollRun(owner, runId) {
+  const { html: htmlUrl } = { html: `https://github.com/${owner}/actions/runs/${runId}` };
+  els.actionsLink.href = htmlUrl;
+
+  // 履歴に「実行中」エントリを先頭追加
+  upsertHistory({ runId, htmlUrl, privacy, status: "in_progress", startedAt: Date.now() });
+
+  const tick = async () => {
+    let runData, jobsData;
+    try {
+      runData = await ghJson(`/repos/${owner}/actions/runs/${runId}`);
+      jobsData = await ghJson(`/repos/${owner}/actions/runs/${runId}/jobs`);
+    } catch (e) {
+      banner("warn", "進捗の取得に失敗しました。再試行します… (" + (e.message || e) + ")");
+      pollTimer = setTimeout(tick, POLL_MS);
+      return;
+    }
+
+    els.actionsLink.href = runData.html_url || htmlUrl;
+    const steps = collectSteps(jobsData.jobs || []);
+    renderSteps(steps);
+
+    const status = runData.status;      // queued | in_progress | completed
+    const conclusion = runData.conclusion; // success | failure | cancelled | ...
+
+    if (status === "completed") {
+      const ok = conclusion === "success";
+      els.progressState.textContent = ok ? "完了 ✅" : "失敗 ❌";
+      els.progressState.className = "badge " + (ok ? "ok" : "ng");
+
+      let result = null;
+      try { result = await fetchResult(owner, runId, jobsData.jobs || []); } catch (e) { /* 任意 */ }
+      renderResult(ok, conclusion, steps, runData.html_url || htmlUrl, result);
+      upsertHistory({
+        runId, htmlUrl: runData.html_url || htmlUrl, privacy,
+        status: conclusion, startedAt: Date.now(),
+        theme: result && result.theme, title: result && result.title, url: result && result.url,
+      });
+      setRunning(false);
+      return;
+    }
+
+    els.progressState.textContent = status === "queued" ? "待機中" : "実行中 ⏳";
+    els.progressState.className = "badge run";
+    pollTimer = setTimeout(tick, POLL_MS);
+  };
+  tick();
+}
+
+// 全ジョブの steps を論理ステップにマッピング
+function collectSteps(jobs) {
+  const flat = [];
+  jobs.forEach((j) => (j.steps || []).forEach((s) => flat.push(s)));
+  return STEPS.map((def) => {
+    const match = flat.find((s) => (s.name || "").toLowerCase().includes(def.keyword));
+    let state = "pending";
+    if (match) {
+      if (match.status === "completed") {
+        state = match.conclusion === "success" ? "done"
+              : (match.conclusion === "skipped" ? "pending" : "failed");
+      } else if (match.status === "in_progress" || match.status === "queued") {
+        state = "current";
+      }
+    }
+    return { ...def, state };
+  });
+}
+
+function renderSteps(steps) {
+  els.steps.innerHTML = steps.map((s) => {
+    const icon = s.state === "done" ? "✅"
+      : s.state === "failed" ? "❌"
+      : s.state === "current" ? "⏳"
+      : "•";
+    return `<li class="step ${s.state}">
+      <span class="icon">${icon}</span>
+      <span class="name">${s.label}<span class="desc">${s.desc}</span></span>
+    </li>`;
+  }).join("");
+}
+
+function resetProgress() {
+  els.progressCard.classList.remove("hidden");
+  els.resultCard.classList.add("hidden");
+  els.progressState.textContent = "起動中";
+  els.progressState.className = "badge run";
+  renderSteps(STEPS.map((s) => ({ ...s, state: "pending" })));
+}
+
+// 結果(テーマ / タイトル / YouTube URL)を取得する。
+// pipeline.yml が投稿ジョブで `::notice title=RESULT::THEME=...||TITLE=...||URL=...` を
+// 出力していれば、その注釈(annotation)を REST API 経由で読み取る(CORS 対応・追加サービス不要)。
+async function fetchResult(owner, runId, jobs) {
+  for (const job of jobs) {
+    if (!job.check_run_url) continue;
+    let ann;
+    try { ann = await ghJson(`${job.check_run_url}/annotations`); } catch (e) { continue; }
+    for (const a of ann || []) {
+      const msg = (a.message || "") + " " + (a.title || "");
+      if (/THEME=|TITLE=|URL=/.test(msg)) {
+        return {
+          theme: pick(msg, "THEME"),
+          title: pick(msg, "TITLE"),
+          url: pick(msg, "URL"),
+          failedStep: null,
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function pick(text, key) {
+  const m = text.match(new RegExp(key + "=([^|\\n]+?)(?:\\s*\\|\\||\\n|$)"));
+  return m ? m[1].trim() : null;
+}
+
+function renderResult(ok, conclusion, steps, htmlUrl, result) {
+  els.resultCard.classList.remove("hidden");
+  if (ok) {
+    let html = '<dl class="result">';
+    if (result && result.theme) html += `<dt>決定テーマ</dt><dd>${escapeHtml(result.theme)}</dd>`;
+    if (result && result.title) html += `<dt>動画タイトル</dt><dd>${escapeHtml(result.title)}</dd>`;
+    html += "</dl>";
+    if (result && result.url) {
+      html += `<a class="yt-link" href="${escapeHtml(result.url)}" target="_blank" rel="noopener">▶ YouTube で開く(投稿された動画)</a>`;
+      html += `<p class="privacy-note">非公開で投稿した場合は、上のリンクから内容を確認し、YouTube 側で公開に切り替えてください。</p>`;
+    } else {
+      html += `<p class="privacy-note">結果の詳細(テーマ / タイトル / YouTube リンク)は Actions のジョブサマリーに出力されています。<br>
+        UI に自動表示するには、README の追記例のとおり pipeline.yml に <code>RESULT</code> notice の出力を追加してください。</p>`;
+    }
+    html += `<a class="link-btn" href="${escapeHtml(htmlUrl)}" target="_blank" rel="noopener">Actions のジョブサマリーを開く ↗</a>`;
+    els.resultBody.innerHTML = html;
+  } else {
+    const failed = steps.find((s) => s.state === "failed");
+    const where = failed ? `<strong>${failed.label}</strong>(${failed.desc})ステップ` : "いずれかのステップ";
+    els.resultBody.innerHTML = `
+      <div class="banner error" style="display:block;">
+        ${where} で失敗しました(結果: ${escapeHtml(conclusion || "failure")})。
+      </div>
+      <a class="link-btn" href="${escapeHtml(htmlUrl)}" target="_blank" rel="noopener">Actions のログを開いて詳細を確認 ↗</a>`;
+  }
+}
+
+// ---- 実行履歴(直近5件) ----------------------------------------
+function getHistory() {
+  try { return JSON.parse(localStorage.getItem(LS.history) || "[]"); } catch (e) { return []; }
+}
+function upsertHistory(entry) {
+  let hist = getHistory();
+  const idx = hist.findIndex((h) => h.runId === entry.runId);
+  if (idx >= 0) hist[idx] = { ...hist[idx], ...entry };
+  else hist.unshift(entry);
+  hist = hist.slice(0, 5);
+  localStorage.setItem(LS.history, JSON.stringify(hist));
+  renderHistory();
+}
+function renderHistory() {
+  const hist = getHistory();
+  if (!hist.length) { els.history.innerHTML = '<li class="h-meta">まだ実行履歴はありません。</li>'; return; }
+  els.history.innerHTML = hist.map((h) => {
+    const pv = h.privacy === "public"
+      ? '<span class="badge public">公開</span>' : '<span class="badge private">非公開</span>';
+    let st;
+    if (h.status === "success") st = '<span class="badge ok">成功</span>';
+    else if (h.status === "in_progress") st = '<span class="badge run">実行中</span>';
+    else st = '<span class="badge ng">' + escapeHtml(h.status || "失敗") + '</span>';
+    const title = h.title ? escapeHtml(h.title) : (h.theme ? escapeHtml(h.theme) : "run #" + h.runId);
+    const yt = h.url ? ` · <a href="${escapeHtml(h.url)}" target="_blank" rel="noopener">YouTube ↗</a>` : "";
+    return `<li>
+      <div class="h-title">${title} ${pv} ${st}</div>
+      <div class="h-meta">
+        <a href="${escapeHtml(h.htmlUrl)}" target="_blank" rel="noopener">run #${h.runId} ↗</a>${yt}
+      </div>
+    </li>`;
+  }).join("");
+}
+
+// ---- UI 状態 -----------------------------------------------------
+function setRunning(v) {
+  running = v;
+  els.runBtn.disabled = v;
+  els.runBtnLabel.innerHTML = v
+    ? '<span class="spinner"></span> 実行中…'
+    : "▶ 動画を作成";
+  if (pollTimer && !v) { clearTimeout(pollTimer); pollTimer = null; }
+}
+
+// ---- ユーティリティ ---------------------------------------------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+// ---- イベント配線 ------------------------------------------------
+els.saveSettings.addEventListener("click", saveSettings);
+els.clearToken.addEventListener("click", () => {
+  localStorage.removeItem(LS.token);
+  els.token.value = "";
+  banner("info", "保存済みトークンを削除しました。");
+});
+els.privacyToggle.querySelectorAll("button").forEach((b) => {
+  b.addEventListener("click", () => setPrivacy(b.dataset.value));
+});
+els.runBtn.addEventListener("click", () => { if (!running) run(); });
+
+// 初期化
+loadSettings();
+renderHistory();
+</script>
+</body>
+</html>
