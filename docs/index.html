@@ -267,6 +267,16 @@
   .badge.ng      { background: rgba(248,81,73,0.25); color: #ffb4ae; }
   .badge.run     { background: rgba(88,166,255,0.2); color: var(--link); }
 
+  /* 進捗ヘッダーに出す run ID(デバッグ用の小さな表示) */
+  .run-id {
+    font-size: 0.7rem;
+    color: var(--muted);
+    font-weight: 400;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    vertical-align: middle;
+  }
+  .run-id a { color: var(--muted); text-decoration: none; }
+
   .hidden { display: none !important; }
   details summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; }
   .foot { text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 8px; }
@@ -330,7 +340,7 @@
 
   <!-- ================= 進捗 ================= -->
   <section class="card hidden" id="progressCard">
-    <h2>進捗 <span id="progressState" class="badge run">起動中</span></h2>
+    <h2>進捗 <span id="progressState" class="badge run">起動中</span> <span id="runIdLabel" class="run-id"></span></h2>
     <ul class="steps" id="steps"></ul>
     <p id="progressMsg" class="progress-msg hidden"></p>
     <a class="link-btn" id="actionsLink" href="#" target="_blank" rel="noopener">Actions のログを開く ↗</a>
@@ -397,6 +407,7 @@ const els = {
   privacyToggle: $("privacyToggle"), privacyNote: $("privacyNote"),
   runBtn: $("runBtn"), runBtnLabel: $("runBtnLabel"),
   progressCard: $("progressCard"), progressState: $("progressState"),
+  runIdLabel: $("runIdLabel"),
   steps: $("steps"), progressMsg: $("progressMsg"), actionsLink: $("actionsLink"),
   resultCard: $("resultCard"), resultBody: $("resultBody"),
   history: $("history"),
@@ -571,29 +582,43 @@ async function run() {
     return;
   }
   clearBanner();
+  // フォールバックで採用した場合は、厳密特定でない旨を進捗欄に残す(静かに誤採用しない)
+  if (found.fallback) {
+    progressMsg("warn",
+      "新しい run を厳密に特定できなかったため、最新の実行中 run を進捗対象として採用しました。");
+  }
   pollRun(owner, found.runId);
 }
 
-// 新しい run が出現するまで待つ。
-// ・エラーを握りつぶさず、認証/権限/404 は待っても直らないため即座に返す。
-// ・ワークフロー指定エンドポイントと repo 全体の両方を探索し、反映遅延にも強くする。
-// 返り値: { runId } または { error }
-async function waitForRun(owner, workflow, baselineRunId, attempts = 20) {
+// concurrency グループを追加すると dispatch 直後の run は
+// queued / waiting / pending / requested を経由してから in_progress になる。
+// これらを取りこぼさないための注意点:
+//   ① status フィルタも event フィルタも一切かけない(未完了 run を確実に含める)。
+//   ② concurrency の待機を考慮し、~30秒 / 数秒間隔でリトライする。
+//   ③ baseline 判定で特定できなくても、最新 run が実行中/キューならそれを採用する。
+// 返り値: { runId } / { runId, fallback:true } / { error }
+async function waitForRun(owner, workflow, baselineRunId, maxMs = 30000) {
   const urls = [
-    `/repos/${owner}/actions/workflows/${encodeURIComponent(workflow)}/runs?per_page=10&event=workflow_dispatch`,
-    `/repos/${owner}/actions/runs?per_page=10&event=workflow_dispatch`,
+    `/repos/${owner}/actions/workflows/${encodeURIComponent(workflow)}/runs?per_page=15`,
+    `/repos/${owner}/actions/runs?per_page=15`,
   ];
+  const deadline = Date.now() + maxMs;
   let lastErr = null;
-  for (let i = 0; i < attempts; i++) {
+  let latestActive = null; // フォールバック候補: 完了していない最新 run
+  while (true) {
     for (const url of urls) {
       try {
         const data = await ghJson(url);
         const runs = data.workflow_runs || [];
-        // baseline より新しい run のうち最も古いもの(=今起動した run)を選ぶ
+        // baseline より新しい run のうち最も古いもの(=今起動した run)を選ぶ。
+        // status は問わない(queued/waiting/pending/requested/in_progress を含む)。
         const fresh = runs
           .filter((r) => r.id > baselineRunId)
           .sort((a, b) => a.id - b.id)[0];
         if (fresh) return { runId: fresh.id };
+        // フォールバック候補として、最新(最大 id)かつ未完了の run を控えておく
+        const newest = runs.slice().sort((a, b) => b.id - a.id)[0];
+        if (newest && newest.status !== "completed") latestActive = newest;
       } catch (e) {
         lastErr = e;
         if (e.status === 401 || e.status === 403 || e.status === 404) {
@@ -601,8 +626,11 @@ async function waitForRun(owner, workflow, baselineRunId, attempts = 20) {
         }
       }
     }
-    await sleep(2000);
+    if (Date.now() >= deadline) break;
+    await sleep(2500);
   }
+  // ③ フォールバック: baseline 判定で特定できなくても、最新 run が実行中/キューなら採用
+  if (latestActive) return { runId: latestActive.id, fallback: true };
   return { error: lastErr };
 }
 
@@ -610,6 +638,9 @@ async function waitForRun(owner, workflow, baselineRunId, attempts = 20) {
 async function pollRun(owner, runId) {
   const { html: htmlUrl } = { html: `https://github.com/${owner}/actions/runs/${runId}` };
   els.actionsLink.href = htmlUrl;
+  // ④ 特定した run ID を進捗欄に小さく表示(デバッグしやすくする)
+  els.runIdLabel.innerHTML =
+    `<a href="${escapeHtml(htmlUrl)}" target="_blank" rel="noopener">run #${runId} ↗</a>`;
   runStartedMs = null;
   startElapsedTicker();
 
@@ -809,6 +840,7 @@ function resetProgress() {
   els.resultCard.classList.add("hidden");
   els.progressState.textContent = "起動中";
   els.progressState.className = "badge run";
+  els.runIdLabel.innerHTML = "";
   progressMsg(null);
   renderSteps(STEPS.map((s) => ({ ...s, state: "pending", startedMs: null, durationSec: null })));
 }
