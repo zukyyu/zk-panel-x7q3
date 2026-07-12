@@ -169,10 +169,44 @@
   .step .icon { width: 26px; text-align: center; font-size: 1.1rem; flex: 0 0 auto; }
   .step .name { font-weight: 600; }
   .step .desc { display: block; font-size: 0.75rem; color: var(--muted); font-weight: 400; }
-  .step.current { background: rgba(88,166,255,0.10); border-color: rgba(88,166,255,0.4); }
+  /* 実行中ステップはアニメーション付きハイライトで「今ここ」を強調する */
+  .step.current {
+    background: rgba(88,166,255,0.10);
+    border-color: rgba(88,166,255,0.4);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { background: rgba(88,166,255,0.08); border-color: rgba(88,166,255,0.35); }
+    50%      { background: rgba(88,166,255,0.20); border-color: rgba(88,166,255,0.75); }
+  }
+  .step.current .icon { animation: spin 1.6s linear infinite; }
   .step.done .name { color: var(--accent-hover); }
   .step.failed .name { color: var(--danger); }
   .step.pending { opacity: 0.55; }
+
+  /* 各ステップの所要秒数 / 経過秒数 */
+  .step .time {
+    margin-left: auto;
+    flex: 0 0 auto;
+    font-size: 0.8rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .step.current .time { color: var(--link); }
+  .step.done .time { color: var(--accent-hover); }
+
+  /* 進捗欄のメッセージ(失敗理由などを静かに止めず表示する) */
+  .progress-msg {
+    font-size: 0.85rem;
+    margin: 12px 0 4px;
+    padding: 10px 12px;
+    border-radius: 8px;
+  }
+  .progress-msg.err  { background: rgba(248,81,73,0.12); border: 1px solid var(--danger); color: #ffb4ae; }
+  .progress-msg.warn { background: rgba(210,153,34,0.12); border: 1px solid var(--warn); color: #f2cc60; }
+  .progress-msg.info { color: var(--muted); }
+  .progress-msg a { color: var(--link); }
 
   /* 結果サマリー */
   .result dt { font-size: 0.75rem; color: var(--muted); margin-top: 10px; }
@@ -298,6 +332,7 @@
   <section class="card hidden" id="progressCard">
     <h2>進捗 <span id="progressState" class="badge run">起動中</span></h2>
     <ul class="steps" id="steps"></ul>
+    <p id="progressMsg" class="progress-msg hidden"></p>
     <a class="link-btn" id="actionsLink" href="#" target="_blank" rel="noopener">Actions のログを開く ↗</a>
   </section>
 
@@ -350,7 +385,8 @@ const STEPS = [
 ];
 
 const API = "https://api.github.com";
-const POLL_MS = 4000;
+// パイプラインは約1.5分で完走するため、途中経過が見えるよう短めにポーリングする。
+const POLL_MS = 2500;
 
 // ---- DOM ヘルパ -------------------------------------------------
 const $ = (id) => document.getElementById(id);
@@ -361,7 +397,7 @@ const els = {
   privacyToggle: $("privacyToggle"), privacyNote: $("privacyNote"),
   runBtn: $("runBtn"), runBtnLabel: $("runBtnLabel"),
   progressCard: $("progressCard"), progressState: $("progressState"),
-  steps: $("steps"), actionsLink: $("actionsLink"),
+  steps: $("steps"), progressMsg: $("progressMsg"), actionsLink: $("actionsLink"),
   resultCard: $("resultCard"), resultBody: $("resultBody"),
   history: $("history"),
 };
@@ -369,6 +405,8 @@ const els = {
 let privacy = "private";
 let running = false;
 let pollTimer = null;
+let elapsedTimer = null;   // 実行中ステップ・全体経過の1秒ごとカウントアップ用
+let runStartedMs = null;   // run 全体の開始時刻(ミリ秒)
 
 // ---- localStorage 読み書き -------------------------------------
 function loadSettings() {
@@ -402,6 +440,29 @@ function banner(type, msg) {
   els.banner.innerHTML = msg;
 }
 function clearBanner() { els.banner.className = "banner"; els.banner.innerHTML = ""; }
+
+// ---- 進捗欄メッセージ(失敗理由などを進捗カード内に残す) ----------
+function progressMsg(type, msg) {
+  if (!msg) { els.progressMsg.className = "progress-msg hidden"; els.progressMsg.innerHTML = ""; return; }
+  els.progressMsg.className = "progress-msg " + type;
+  els.progressMsg.innerHTML = msg;
+}
+
+// API エラーを日本語で説明する。ステータス別に原因を切り分ける。
+function describeApiError(e) {
+  if (!e) return "";
+  if (e.status === 401 || e.status === 403) {
+    return "認証/権限エラー(PAT の権限「このリポジトリの Actions: Read and write」と有効期限を確認してください)。";
+  }
+  if (e.status === 404) {
+    return "リポジトリまたはワークフローが見つかりません(owner/repo・ワークフローファイル名・ブランチを確認してください)。";
+  }
+  if (e.status) {
+    const detail = e.detail ? (": " + String(e.detail).slice(0, 150)) : "";
+    return "HTTP " + e.status + detail;
+  }
+  return e.message || String(e);
+}
 
 // ---- 公開設定トグル ---------------------------------------------
 function setPrivacy(value) {
@@ -494,50 +555,113 @@ async function run() {
 
   // 起動直後は run 一覧に反映されるまで数秒かかるためポーリングで待つ
   banner("info", "起動しました。実行中の run を待機しています…");
-  const runId = await waitForRun(owner, workflow, baselineRunId);
-  if (!runId) {
-    banner("warn", "起動しましたが run を特定できませんでした。Actions ページで進捗を確認してください。");
+  const found = await waitForRun(owner, workflow, baselineRunId);
+  if (!found.runId) {
+    // 静かに止めず、進捗欄に理由と Actions リンクを残す
+    const reason = found.error
+      ? describeApiError(found.error)
+      : "起動直後の run 一覧に新しい実行が現れませんでした(反映遅延・ブランチ違い等)。";
+    banner("warn", "run を特定できませんでした。" + reason);
+    progressMsg("err",
+      "起動した run を特定できませんでした: " + reason +
+      ` <a href="https://github.com/${escapeHtml(owner)}/actions" target="_blank" rel="noopener">Actions ページで確認 ↗</a>`);
+    els.progressState.textContent = "特定できず ❌";
+    els.progressState.className = "badge ng";
     setRunning(false);
     return;
   }
   clearBanner();
-  pollRun(owner, runId);
+  pollRun(owner, found.runId);
 }
 
-// 新しい run が出現するまで待つ
-async function waitForRun(owner, workflow, baselineRunId, attempts = 15) {
+// 新しい run が出現するまで待つ。
+// ・エラーを握りつぶさず、認証/権限/404 は待っても直らないため即座に返す。
+// ・ワークフロー指定エンドポイントと repo 全体の両方を探索し、反映遅延にも強くする。
+// 返り値: { runId } または { error }
+async function waitForRun(owner, workflow, baselineRunId, attempts = 20) {
+  const urls = [
+    `/repos/${owner}/actions/workflows/${encodeURIComponent(workflow)}/runs?per_page=10&event=workflow_dispatch`,
+    `/repos/${owner}/actions/runs?per_page=10&event=workflow_dispatch`,
+  ];
+  let lastErr = null;
   for (let i = 0; i < attempts; i++) {
-    try {
-      const data = await ghJson(`/repos/${owner}/actions/workflows/${encodeURIComponent(workflow)}/runs?per_page=5&event=workflow_dispatch`);
-      const runs = data.workflow_runs || [];
-      const fresh = runs.find((r) => r.id > baselineRunId);
-      if (fresh) return fresh.id;
-    } catch (e) { /* リトライ */ }
+    for (const url of urls) {
+      try {
+        const data = await ghJson(url);
+        const runs = data.workflow_runs || [];
+        // baseline より新しい run のうち最も古いもの(=今起動した run)を選ぶ
+        const fresh = runs
+          .filter((r) => r.id > baselineRunId)
+          .sort((a, b) => a.id - b.id)[0];
+        if (fresh) return { runId: fresh.id };
+      } catch (e) {
+        lastErr = e;
+        if (e.status === 401 || e.status === 403 || e.status === 404) {
+          return { error: e }; // 認証/権限/未検出は待っても解決しない
+        }
+      }
+    }
     await sleep(2000);
   }
-  return null;
+  return { error: lastErr };
 }
 
 // run をポーリングして進捗・完了を反映
 async function pollRun(owner, runId) {
   const { html: htmlUrl } = { html: `https://github.com/${owner}/actions/runs/${runId}` };
   els.actionsLink.href = htmlUrl;
+  runStartedMs = null;
+  startElapsedTicker();
 
   // 履歴に「実行中」エントリを先頭追加
   upsertHistory({ runId, htmlUrl, privacy, status: "in_progress", startedAt: Date.now() });
 
+  let failCount = 0;
   const tick = async () => {
     let runData, jobsData;
     try {
       runData = await ghJson(`/repos/${owner}/actions/runs/${runId}`);
       jobsData = await ghJson(`/repos/${owner}/actions/runs/${runId}/jobs`);
+      failCount = 0;
+      progressMsg(null); // 取得成功したら以前の警告を消す
     } catch (e) {
-      banner("warn", "進捗の取得に失敗しました。再試行します… (" + (e.message || e) + ")");
+      // 認証/権限/404 は待っても直らないため即停止して理由を進捗欄に表示
+      if (e.status === 401 || e.status === 403 || e.status === 404) {
+        stopElapsedTicker();
+        els.progressState.textContent = "取得失敗 ❌";
+        els.progressState.className = "badge ng";
+        progressMsg("err",
+          "進捗の取得に失敗しました: " + describeApiError(e) +
+          ` <a href="${escapeHtml(htmlUrl)}" target="_blank" rel="noopener">Actions で確認 ↗</a>`);
+        setRunning(false);
+        return;
+      }
+      // 一時的なエラーは上限付きでリトライ。上限超過で静かに止めず理由を表示
+      failCount++;
+      if (failCount >= 8) {
+        stopElapsedTicker();
+        els.progressState.textContent = "取得失敗 ❌";
+        els.progressState.className = "badge ng";
+        progressMsg("err",
+          "進捗の取得に連続失敗しました: " + describeApiError(e) +
+          ` <a href="${escapeHtml(htmlUrl)}" target="_blank" rel="noopener">Actions で確認 ↗</a>`);
+        setRunning(false);
+        return;
+      }
+      progressMsg("warn", "進捗の取得に失敗しました。再試行中… (" + describeApiError(e) + ")");
       pollTimer = setTimeout(tick, POLL_MS);
       return;
     }
 
+    try {
     els.actionsLink.href = runData.html_url || htmlUrl;
+    // run 全体の開始時刻(経過時間の基準)。run_started_at は run が実際に走り始めて
+    // から設定されるため、これを基準にする(queued 中は null のまま「待機中」を保つ)。
+    if (runData.run_started_at) {
+      const t = Date.parse(runData.run_started_at);
+      if (!isNaN(t)) runStartedMs = t;
+    }
+
     const steps = collectSteps(jobsData.jobs || []);
     renderSteps(steps);
 
@@ -545,36 +669,69 @@ async function pollRun(owner, runId) {
     const conclusion = runData.conclusion; // success | failure | cancelled | ...
 
     if (status === "completed") {
+      stopElapsedTicker();
       const ok = conclusion === "success";
       els.progressState.textContent = ok ? "完了 ✅" : "失敗 ❌";
       els.progressState.className = "badge " + (ok ? "ok" : "ng");
 
+      // 全体所要時間 = run_started_at(無ければ created_at)→ updated_at。
+      // いずれも取れなければ各ステップの実所要秒数の合計で代用する。
+      const endT = Date.parse(runData.updated_at || "");
+      const startT = runStartedMs || Date.parse(runData.created_at || "");
+      let totalSec = (startT && !isNaN(startT) && !isNaN(endT) && endT >= startT)
+        ? (endT - startT) / 1000 : null;
+      if (totalSec == null) {
+        const sum = steps.reduce((a, s) => a + (s.durationSec || 0), 0);
+        totalSec = sum > 0 ? sum : null;
+      }
+
       let result = null;
       try { result = await fetchResult(owner, runId, jobsData.jobs || []); } catch (e) { /* 任意 */ }
-      renderResult(ok, conclusion, steps, runData.html_url || htmlUrl, result);
+      renderResult(ok, conclusion, steps, runData.html_url || htmlUrl, result, totalSec);
       upsertHistory({
         runId, htmlUrl: runData.html_url || htmlUrl, privacy,
-        status: conclusion, startedAt: Date.now(),
+        status: conclusion, startedAt: Date.now(), totalSec,
         theme: result && result.theme, title: result && result.title, url: result && result.url,
       });
       setRunning(false);
       return;
     }
 
-    els.progressState.textContent = status === "queued" ? "待機中" : "実行中 ⏳";
-    els.progressState.className = "badge run";
+    if (status === "queued") {
+      els.progressState.textContent = "待機中";
+      els.progressState.className = "badge run";
+    } else {
+      // in_progress: 起動中バッジのまま固まらないよう確実に「実行中」へ更新
+      els.progressState.textContent = "実行中 ⏳";
+      els.progressState.className = "badge run";
+      updateElapsed(); // 経過秒数があれば付与
+    }
     pollTimer = setTimeout(tick, POLL_MS);
+    } catch (e) {
+      // 想定外の描画エラーでも黙って止めず、警告を出して再試行する
+      progressMsg("warn", "進捗表示の更新中にエラーが発生しました。再試行します… (" + (e.message || e) + ")");
+      pollTimer = setTimeout(tick, POLL_MS);
+    }
   };
   tick();
 }
 
-// 全ジョブの steps を論理ステップにマッピング
+// 全ジョブの steps を論理ステップにマッピング。
+// steps[].status と started_at / completed_at から実所要秒数・経過時間も算出する。
 function collectSteps(jobs) {
   const flat = [];
   jobs.forEach((j) => (j.steps || []).forEach((s) => flat.push(s)));
   return STEPS.map((def) => {
-    const match = flat.find((s) => (s.name || "").toLowerCase().includes(def.keyword));
+    // pipeline.yml のコマンドステップ名は research/plan/script/voice/video/upload と
+    // 完全一致するため、まず完全一致を優先する。これにより "upload" が先に現れる
+    // 「Upload rendered videos」等の別ステップへ誤マッチするのを防ぐ。
+    // 見つからない場合のみキーワード包含でフォールバックする。
+    const lc = (s) => (s.name || "").toLowerCase().trim();
+    const match = flat.find((s) => lc(s) === def.keyword)
+               || flat.find((s) => lc(s).includes(def.keyword));
     let state = "pending";
+    let startedMs = null;
+    let durationSec = null;
     if (match) {
       if (match.status === "completed") {
         state = match.conclusion === "success" ? "done"
@@ -582,9 +739,22 @@ function collectSteps(jobs) {
       } else if (match.status === "in_progress" || match.status === "queued") {
         state = "current";
       }
+      const st = match.started_at ? Date.parse(match.started_at) : NaN;
+      const ct = match.completed_at ? Date.parse(match.completed_at) : NaN;
+      if (!isNaN(st)) startedMs = st;
+      // 完了済み(started/completed 両方あり)は実所要秒数を確定表示する。
+      // 一気に✅になっても「research に45秒、plan に8秒」が後から分かる。
+      if (!isNaN(st) && !isNaN(ct) && ct >= st) durationSec = (ct - st) / 1000;
     }
-    return { ...def, state };
+    return { ...def, state, startedMs, durationSec };
   });
+}
+
+// 秒数を「45秒」「1分5秒」の形に整形する。
+function fmtDur(sec) {
+  const s = Math.max(0, Math.round(sec));
+  if (s < 60) return s + "秒";
+  return Math.floor(s / 60) + "分" + (s % 60) + "秒";
 }
 
 function renderSteps(steps) {
@@ -593,19 +763,54 @@ function renderSteps(steps) {
       : s.state === "failed" ? "❌"
       : s.state === "current" ? "⏳"
       : "•";
+    // 完了: 実所要秒数を確定表示 / 実行中: 経過秒数を data-start からカウントアップ
+    let time = "";
+    if (s.state === "done" && s.durationSec != null) {
+      time = `<span class="time">${fmtDur(s.durationSec)}</span>`;
+    } else if (s.state === "current") {
+      const start = s.startedMs != null ? s.startedMs : "";
+      time = `<span class="time" data-start="${start}">経過 …</span>`;
+    } else if (s.state === "failed" && s.durationSec != null) {
+      time = `<span class="time">${fmtDur(s.durationSec)}</span>`;
+    }
     return `<li class="step ${s.state}">
       <span class="icon">${icon}</span>
       <span class="name">${s.label}<span class="desc">${s.desc}</span></span>
+      ${time}
     </li>`;
   }).join("");
+  updateElapsed(); // 描画直後にも一度だけ経過秒数を反映しておく
+}
+
+// 実行中ステップの経過秒数と、進捗ヘッダーの全体経過を1秒ごとに更新する。
+function updateElapsed() {
+  const now = Date.now();
+  els.steps.querySelectorAll(".step.current .time[data-start]").forEach((el) => {
+    const start = parseInt(el.getAttribute("data-start"), 10);
+    if (!isNaN(start) && start > 0) el.textContent = "経過 " + fmtDur((now - start) / 1000);
+  });
+  if (runStartedMs && running) {
+    els.progressState.textContent = "実行中 ⏳ " + fmtDur((now - runStartedMs) / 1000);
+    els.progressState.className = "badge run";
+  }
+}
+
+function startElapsedTicker() {
+  stopElapsedTicker();
+  elapsedTimer = setInterval(updateElapsed, 1000);
+}
+function stopElapsedTicker() {
+  if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
 }
 
 function resetProgress() {
+  runStartedMs = null;
   els.progressCard.classList.remove("hidden");
   els.resultCard.classList.add("hidden");
   els.progressState.textContent = "起動中";
   els.progressState.className = "badge run";
-  renderSteps(STEPS.map((s) => ({ ...s, state: "pending" })));
+  progressMsg(null);
+  renderSteps(STEPS.map((s) => ({ ...s, state: "pending", startedMs: null, durationSec: null })));
 }
 
 // 結果(テーマ / タイトル / YouTube URL)を取得する。
@@ -636,12 +841,19 @@ function pick(text, key) {
   return m ? m[1].trim() : null;
 }
 
-function renderResult(ok, conclusion, steps, htmlUrl, result) {
+function renderResult(ok, conclusion, steps, htmlUrl, result, totalSec) {
   els.resultCard.classList.remove("hidden");
   if (ok) {
     let html = '<dl class="result">';
     if (result && result.theme) html += `<dt>決定テーマ</dt><dd>${escapeHtml(result.theme)}</dd>`;
     if (result && result.title) html += `<dt>動画タイトル</dt><dd>${escapeHtml(result.title)}</dd>`;
+    if (totalSec != null) html += `<dt>全体所要時間</dt><dd>${fmtDur(totalSec)}</dd>`;
+    // 各ステップの実所要秒数(一気に完了しても内訳が分かる)
+    const done = steps.filter((s) => s.durationSec != null);
+    if (done.length) {
+      const breakdown = done.map((s) => `${escapeHtml(s.label)} ${fmtDur(s.durationSec)}`).join(" / ");
+      html += `<dt>ステップ内訳</dt><dd>${breakdown}</dd>`;
+    }
     html += "</dl>";
     if (result && result.url) {
       html += `<a class="yt-link" href="${escapeHtml(result.url)}" target="_blank" rel="noopener">▶ YouTube で開く(投稿された動画)</a>`;
@@ -688,10 +900,11 @@ function renderHistory() {
     else st = '<span class="badge ng">' + escapeHtml(h.status || "失敗") + '</span>';
     const title = h.title ? escapeHtml(h.title) : (h.theme ? escapeHtml(h.theme) : "run #" + h.runId);
     const yt = h.url ? ` · <a href="${escapeHtml(h.url)}" target="_blank" rel="noopener">YouTube ↗</a>` : "";
+    const dur = (h.totalSec != null) ? ` · ⏱ ${fmtDur(h.totalSec)}` : "";
     return `<li>
       <div class="h-title">${title} ${pv} ${st}</div>
       <div class="h-meta">
-        <a href="${escapeHtml(h.htmlUrl)}" target="_blank" rel="noopener">run #${h.runId} ↗</a>${yt}
+        <a href="${escapeHtml(h.htmlUrl)}" target="_blank" rel="noopener">run #${h.runId} ↗</a>${yt}${dur}
       </div>
     </li>`;
   }).join("");
@@ -705,6 +918,7 @@ function setRunning(v) {
     ? '<span class="spinner"></span> 実行中…'
     : "▶ 動画を作成";
   if (pollTimer && !v) { clearTimeout(pollTimer); pollTimer = null; }
+  if (!v) stopElapsedTicker();
 }
 
 // ---- ユーティリティ ---------------------------------------------
